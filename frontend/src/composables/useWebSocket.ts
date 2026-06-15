@@ -4,8 +4,64 @@ import type {
   WebSocketMessage, 
   OutgoingMessage,
   FrameData,
-  ActionAppliedData 
+  ActionAppliedData,
+  JointData,
+  JointsMap
 } from '../types/shadowPuppet';
+
+function expandFrameData(data: any): any {
+  const expanded: any = { ...data };
+
+  if ('t' in data) {
+    expanded.timestamp = data.t;
+    delete expanded.t;
+  }
+  if ('pt' in data) {
+    expanded.physics_time = data.pt;
+    delete expanded.pt;
+  }
+  if ('df' in data) {
+    expanded.dropped_frames = data.df;
+    delete expanded.df;
+  }
+  if ('j' in data) {
+    const joints: JointsMap = {};
+    for (const [jointName, jointData] of Object.entries<any>(data.j)) {
+      joints[jointName] = {
+        rotation_matrix: jointData.rm || jointData.rotation_matrix || [[1,0,0],[0,1,0],[0,0,1]],
+        euler_angles: jointData.ea || jointData.euler_angles || [0, 0, 0],
+        angular_velocity: jointData.angular_velocity || [0, 0, 0],
+        tension_force: jointData.tension_force || [0, 0, 0],
+        position: jointData.position || [0, 0, 0]
+      };
+    }
+    expanded.joints = joints;
+    delete expanded.j;
+  }
+
+  if ('ct' in data) {
+    expanded.client_timestamp = data.ct;
+    delete expanded.ct;
+  }
+  if ('st' in data) {
+    expanded.server_timestamp = data.st;
+    delete expanded.st;
+  }
+  if ('f' in data) {
+    expanded.frames = data.f;
+    delete expanded.f;
+  }
+  if ('fc' in data) {
+    expanded.frame_count = data.fc;
+    delete expanded.fc;
+  }
+
+  return expanded;
+}
+
+function expandBatchFrames(frames: any[]): any[] {
+  return frames.map((f: any) => expandFrameData(f));
+}
 
 export function useWebSocket() {
   const status = ref<ConnectionStatus>('disconnected');
@@ -20,6 +76,10 @@ export function useWebSocket() {
   let shouldReconnect = true;
   let messageQueue: OutgoingMessage[] = [];
 
+  let lastSendTime = 0;
+  const MIN_SEND_INTERVAL = 8;
+  let sendTimer: ReturnType<typeof setTimeout> | null = null;
+
   const onFrameCallbacks: ((frame: FrameData) => void)[] = [];
   const onActionCallbacks: ((action: ActionAppliedData) => void)[] = [];
 
@@ -31,15 +91,54 @@ export function useWebSocket() {
     onActionCallbacks.push(callback);
   }
 
-  function send(message: OutgoingMessage) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(message));
-    } else {
-      messageQueue.push(message);
-      if (messageQueue.length > 100) {
-        messageQueue.shift();
+  function _flushSendQueue() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastSendTime < MIN_SEND_INTERVAL) {
+      if (!sendTimer) {
+        sendTimer = setTimeout(() => {
+          sendTimer = null;
+          _flushSendQueue();
+        }, MIN_SEND_INTERVAL - (now - lastSendTime));
+      }
+      return;
+    }
+
+    while (messageQueue.length > 0) {
+      const msg = messageQueue.shift();
+      if (msg && ws && ws.readyState === WebSocket.OPEN) {
+        const json = JSON.stringify(msg);
+        if (json.length > 64 * 1024) {
+          console.warn('Outgoing message too large, dropping');
+          continue;
+        }
+        const now2 = Date.now();
+        if (now2 - lastSendTime >= MIN_SEND_INTERVAL) {
+          ws.send(json);
+          lastSendTime = now2;
+        } else {
+          messageQueue.unshift(msg);
+          if (!sendTimer) {
+            sendTimer = setTimeout(() => {
+              sendTimer = null;
+              _flushSendQueue();
+            }, MIN_SEND_INTERVAL);
+          }
+          break;
+        }
       }
     }
+  }
+
+  function send(message: OutgoingMessage) {
+    if (messageQueue.length > 100) {
+      messageQueue.shift();
+    }
+    messageQueue.push(message);
+    _flushSendQueue();
   }
 
   function sendKeyPress(key: string) {
@@ -69,47 +168,46 @@ export function useWebSocket() {
   }
 
   function flushQueue() {
-    while (messageQueue.length > 0 && ws && ws.readyState === WebSocket.OPEN) {
-      const msg = messageQueue.shift();
-      if (msg) {
-        ws.send(JSON.stringify(msg));
-      }
-    }
+    _flushSendQueue();
   }
 
   function handleMessage(event: MessageEvent) {
     try {
-      const data: WebSocketMessage = JSON.parse(event.data);
+      const rawData = JSON.parse(event.data);
       
-      switch (data.type) {
+      switch (rawData.type) {
         case 'frame':
-          lastFrame.value = data;
-          onFrameCallbacks.forEach(cb => cb(data));
+        case 'state': {
+          const expanded = expandFrameData(rawData);
+          const frameData = rawData.type === 'state' ? { ...expanded, type: 'frame' } : expanded;
+          lastFrame.value = frameData;
+          onFrameCallbacks.forEach(cb => cb(frameData));
           break;
+        }
         case 'action_applied':
-          lastAction.value = data;
-          onActionCallbacks.forEach(cb => cb(data));
+          lastAction.value = rawData;
+          onActionCallbacks.forEach(cb => cb(rawData));
           break;
-        case 'pong':
-          latency.value = Date.now() - data.client_timestamp;
+        case 'pong': {
+          const expanded = expandFrameData(rawData);
+          latency.value = Date.now() - (expanded.client_timestamp || 0);
           break;
+        }
         case 'reset_complete':
           console.log('Reset complete');
           break;
-        case 'state':
-          lastFrame.value = {
-            ...data,
-            type: 'frame'
-          };
-          onFrameCallbacks.forEach(cb => cb(lastFrame.value!));
+        case 'batch_result': {
+          const expanded = expandFrameData(rawData);
+          if (expanded.frames) {
+            expanded.frames = expandBatchFrames(expanded.frames);
+          }
+          console.log(`Received batch result with ${expanded.frame_count || 0} frames`);
           break;
-        case 'batch_result':
-          console.log(`Received batch result with ${data.frame_count} frames`);
-          break;
+        }
         case 'error':
         case 'warning':
-          errorMessage.value = data.message;
-          console.warn(`Server ${data.type}: ${data.message}`);
+          errorMessage.value = rawData.message;
+          console.warn(`Server ${rawData.type}: ${rawData.message}`);
           break;
       }
     } catch (e) {

@@ -480,6 +480,20 @@ class ShadowPuppetPhysics:
 
         return self._get_joint_rotations()
 
+    @staticmethod
+    def _round_value(value: float, decimals: int = 2) -> float:
+        if math.isnan(value) or math.isinf(value):
+            return 0.0
+        return round(float(value), decimals)
+
+    @classmethod
+    def _round_list(cls, values: List[float], decimals: int = 2) -> List[float]:
+        return [cls._round_value(v, decimals) for v in values]
+
+    @classmethod
+    def _round_matrix(cls, matrix: List[List[float]], decimals: int = 2) -> List[List[float]]:
+        return [cls._round_list(row, decimals) for row in matrix]
+
     def _euler_to_rotation_matrix(self, euler_angles: np.ndarray) -> List[List[float]]:
         rx, ry, rz = euler_angles
 
@@ -502,7 +516,7 @@ class ShadowPuppetPhysics:
         ])
 
         R = Rz @ Ry @ Rx
-        return R.tolist()
+        return self._round_matrix(R.tolist())
 
     def _get_joint_rotations(self) -> Dict[str, Dict]:
         result = {}
@@ -510,10 +524,10 @@ class ShadowPuppetPhysics:
             rotation_matrix = self._euler_to_rotation_matrix(joint.angle)
             result[joint_name] = {
                 'rotation_matrix': rotation_matrix,
-                'euler_angles': joint.angle.tolist(),
-                'angular_velocity': joint.angular_velocity.tolist(),
-                'tension_force': joint.tension_force.tolist(),
-                'position': joint.position.tolist()
+                'euler_angles': self._round_list(joint.angle.tolist()),
+                'angular_velocity': self._round_list(joint.angular_velocity.tolist(), 3),
+                'tension_force': self._round_list(joint.tension_force.tolist(), 1),
+                'position': self._round_list(joint.position.tolist(), 3)
             }
         return result
 

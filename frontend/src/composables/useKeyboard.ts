@@ -5,6 +5,9 @@ export interface KeySequence {
   timestamp: number;
 }
 
+const KEY_DEBOUNCE_MS = 15;
+const MAX_KEYS_PER_SECOND = 60;
+
 export function useKeyboard(
   onKeyPress?: (key: string) => void,
   onSequence?: (sequence: string[]) => void
@@ -12,11 +15,14 @@ export function useKeyboard(
   const pressedKeys = ref<Set<string>>(new Set());
   const keyHistory = ref<string[]>([]);
   const activeSequences = ref<KeySequence[]>([]);
+  const droppedKeys = ref<number>(0);
   const sequenceTimeout = 400;
 
   let lastKeyTime = 0;
+  let lastKeyProcessTime = 0;
   let currentSequence: string[] = [];
   let sequenceTimer: ReturnType<typeof setTimeout> | null = null;
+  let keyCountWindow: number[] = [];
 
   const validKeys = new Set([
     'W', 'A', 'S', 'D', 'Q', 'E',
@@ -34,6 +40,20 @@ export function useKeyboard(
     return validKeys.has(key);
   }
 
+  function checkKeyRateLimit(): boolean {
+    const now = Date.now();
+    const cutoff = now - 1000;
+    keyCountWindow = keyCountWindow.filter(t => t >= cutoff);
+
+    if (keyCountWindow.length >= MAX_KEYS_PER_SECOND) {
+      droppedKeys.value++;
+      return false;
+    }
+
+    keyCountWindow.push(now);
+    return true;
+  }
+
   function handleKeyDown(event: KeyboardEvent) {
     if (event.repeat) return;
 
@@ -43,9 +63,18 @@ export function useKeyboard(
 
     event.preventDefault();
     
-    pressedKeys.value.add(key);
-    
     const now = Date.now();
+
+    if (now - lastKeyProcessTime < KEY_DEBOUNCE_MS) {
+      return;
+    }
+
+    if (!checkKeyRateLimit()) {
+      return;
+    }
+
+    lastKeyProcessTime = now;
+    pressedKeys.value.add(key);
     
     if (now - lastKeyTime > sequenceTimeout) {
       currentSequence = [];
@@ -90,6 +119,8 @@ export function useKeyboard(
     keyHistory.value = [];
     currentSequence = [];
     activeSequences.value = [];
+    keyCountWindow = [];
+    droppedKeys.value = 0;
   }
 
   function isKeyPressed(key: string): boolean {
@@ -116,7 +147,9 @@ export function useKeyboard(
     pressedKeys,
     keyHistory,
     activeSequences,
+    droppedKeys,
     isKeyPressed,
     clearHistory
   };
 }
+
