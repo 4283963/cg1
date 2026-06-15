@@ -9,6 +9,8 @@ interface JointObject3D {
   targetQuaternion: THREE.Quaternion;
   currentQuaternion: THREE.Quaternion;
   parentName: string | null;
+  originalVertices?: Float32Array;
+  edgeLine?: THREE.LineSegments;
 }
 
 let scene: THREE.Scene | null = null;
@@ -20,6 +22,10 @@ let frameCountForFps = 0;
 const joints: Map<string, JointObject3D> = new Map();
 const puppetRoot = new THREE.Group();
 let animationSmoothness = 0.12;
+
+let currentSoftness = 0;
+let targetSoftness = 0;
+let animationTime = 0;
 
 const jointHierarchy: Record<string, string | null> = {
   root: null,
@@ -178,13 +184,18 @@ export function useShadowPuppetRenderer() {
         const edgeLine = new THREE.LineSegments(edges, createLineMaterial());
         mesh.add(edgeLine);
 
+        const positionAttr = geometry.getAttribute('position') as THREE.BufferAttribute;
+        const originalVertices = new Float32Array(positionAttr.array as Float32Array);
+
         const jointObj: JointObject3D = {
           name: jointName,
           object: jointGroup,
           mesh: mesh,
           targetQuaternion: new THREE.Quaternion(),
           currentQuaternion: new THREE.Quaternion(),
-          parentName: parentName
+          parentName: parentName,
+          originalVertices: originalVertices,
+          edgeLine: edgeLine
         };
         joints.set(jointName, jointObj);
       } else {
@@ -276,7 +287,72 @@ export function useShadowPuppetRenderer() {
     return q;
   }
 
+  function updateWaveAnimation(deltaTime: number) {
+    if (currentSoftness < 0.01 && targetSoftness < 0.01) {
+      return;
+    }
+
+    currentSoftness += (targetSoftness - currentSoftness) * deltaTime * 2;
+
+    const waveAmplitude = currentSoftness * 0.015;
+    const waveFrequency = 2.0 + currentSoftness * 3.0;
+
+    for (const jointObj of joints.values()) {
+      if (!jointObj.originalVertices || !jointObj.mesh.geometry) continue;
+
+      const geometry = jointObj.mesh.geometry;
+      const positionAttr = geometry.getAttribute('position') as THREE.BufferAttribute;
+      const positions = positionAttr.array as Float32Array;
+      const origVerts = jointObj.originalVertices;
+
+      const jointWaveOffset = jointObj.name.charCodeAt(0) * 0.1;
+
+      for (let i = 0; i < origVerts.length; i += 3) {
+        const x = origVerts[i];
+        const y = origVerts[i + 1];
+        const z = origVerts[i + 2];
+
+        const distFromCenter = Math.sqrt(x * x + y * y + z * z);
+        const edgeFactor = Math.min(distFromCenter * 3, 1.0);
+
+        const wave1 = Math.sin(animationTime * waveFrequency + y * 5 + jointWaveOffset) * waveAmplitude;
+        const wave2 = Math.sin(animationTime * waveFrequency * 0.7 + x * 4 + jointWaveOffset + 1.0) * waveAmplitude * 0.6;
+        const wave3 = Math.cos(animationTime * waveFrequency * 1.3 + z * 6 + jointWaveOffset + 2.0) * waveAmplitude * 0.4;
+
+        const totalWave = (wave1 + wave2 + wave3) * edgeFactor * currentSoftness;
+
+        positions[i] = x + totalWave * (Math.abs(x) > 0.001 ? 1 : 0.3);
+        positions[i + 1] = y + totalWave * (Math.abs(y) > 0.001 ? 1 : 0.3);
+        positions[i + 2] = z + totalWave * 0.5;
+      }
+
+      positionAttr.needsUpdate = true;
+
+      if (jointObj.edgeLine) {
+        const edgePositions = jointObj.edgeLine.geometry.attributes.position as THREE.BufferAttribute;
+        jointObj.edgeLine.geometry.attributes.position.needsUpdate = true;
+      }
+
+      const material = jointObj.mesh.material as THREE.MeshStandardMaterial;
+      if (material.emissiveIntensity !== undefined) {
+        const baseEmissive = 0.1;
+        const softnessEmissive = currentSoftness * 0.3;
+        const waveEmissive = Math.sin(animationTime * 4 + jointWaveOffset) * 0.05 * currentSoftness;
+        material.emissiveIntensity = baseEmissive + softnessEmissive + waveEmissive;
+      }
+      if (material.roughness !== undefined) {
+        material.roughness = 0.7 + currentSoftness * 0.2;
+      }
+    }
+  }
+
+  function setSoftness(softness: number) {
+    targetSoftness = Math.max(0, Math.min(1, softness));
+  }
+
   function updateAnimation(deltaTime: number) {
+    animationTime += deltaTime;
+
     const lerpFactor = Math.min(animationSmoothness * deltaTime * 60, 1.0);
 
     for (const jointObj of joints.values()) {
@@ -284,6 +360,7 @@ export function useShadowPuppetRenderer() {
       jointObj.object.quaternion.copy(jointObj.currentQuaternion);
     }
 
+    updateWaveAnimation(deltaTime);
     updateStringLines();
   }
 
@@ -443,7 +520,20 @@ export function useShadowPuppetRenderer() {
       jointObj.targetQuaternion.identity();
       jointObj.currentQuaternion.identity();
       jointObj.object.quaternion.identity();
+
+      if (jointObj.originalVertices && jointObj.mesh.geometry) {
+        const positionAttr = jointObj.mesh.geometry.getAttribute('position') as THREE.BufferAttribute;
+        const positions = positionAttr.array as Float32Array;
+        positions.set(jointObj.originalVertices);
+        positionAttr.needsUpdate = true;
+
+        if (jointObj.edgeLine) {
+          jointObj.edgeLine.geometry.attributes.position.needsUpdate = true;
+        }
+      }
     }
+    currentSoftness = 0;
+    targetSoftness = 0;
   }
 
   function getJointAngles(): Record<string, number[]> {
@@ -498,6 +588,7 @@ export function useShadowPuppetRenderer() {
     resetPuppet,
     setCameraPosition,
     setSmoothness,
+    setSoftness,
     getJointAngles,
     handleResize
   };

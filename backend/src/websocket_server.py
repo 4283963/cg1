@@ -217,6 +217,12 @@ class ShadowPuppetServer:
             await self._handle_get_state(session)
         elif msg_type == "batch_sequence":
             await self._handle_batch_sequence(session, data)
+        elif msg_type == "heat_on":
+            await self._handle_heat_on(session, data)
+        elif msg_type == "heat_level":
+            await self._handle_heat_level(session, data)
+        elif msg_type == "heat_reset":
+            await self._handle_heat_reset(session, data)
 
     async def _handle_key_press(self, session: ClientSession, data: Dict):
         key = data.get("key", "").upper()
@@ -297,6 +303,36 @@ class ShadowPuppetServer:
         })
         await self._safe_send(session, reset_msg, high_priority=True)
 
+    async def _handle_heat_on(self, session: ClientSession, data: Dict):
+        on = data.get("on", True)
+        session.physics.set_heat_on(on)
+        ack_msg = self._serialize_json({
+            "type": "heat_ack",
+            "on": on,
+            "timestamp": self._round_float(time.time(), 3)
+        })
+        await self._safe_send(session, ack_msg, high_priority=True)
+
+    async def _handle_heat_level(self, session: ClientSession, data: Dict):
+        level = float(data.get("level", 0.0))
+        session.physics.set_heat_level(level)
+        session.physics.set_heat_on(True)
+        ack_msg = self._serialize_json({
+            "type": "heat_ack",
+            "level": self._round_float(level, 3),
+            "timestamp": self._round_float(time.time(), 3)
+        })
+        await self._safe_send(session, ack_msg, high_priority=True)
+
+    async def _handle_heat_reset(self, session: ClientSession, data: Dict):
+        session.physics.reset_heat()
+        ack_msg = self._serialize_json({
+            "type": "heat_ack",
+            "reset": True,
+            "timestamp": self._round_float(time.time(), 3)
+        })
+        await self._safe_send(session, ack_msg, high_priority=True)
+
     async def _handle_ping(self, session: ClientSession, data: Dict):
         pong_msg = self._serialize_json({
             "type": "pong",
@@ -338,7 +374,9 @@ class ShadowPuppetServer:
             while session.is_connected:
                 start_time = time.time()
 
-                joints_data = session.physics.step()
+                step_result = session.physics.step()
+                joints_data = step_result['joints']
+                heat_state = step_result['heat']
                 trimmed_joints = self._trim_frame_data(joints_data)
 
                 frame_counter += 1
@@ -347,7 +385,13 @@ class ShadowPuppetServer:
                     "type": "frame",
                     "t": self._round_float(time.time(), 3),
                     "pt": self._round_float(session.physics.time, 3),
-                    "j": trimmed_joints
+                    "j": trimmed_joints,
+                    "h": {
+                        "t": heat_state.get('performance_time', 0),
+                        "hl": heat_state.get('heat_level', 0),
+                        "s": heat_state.get('softness', 0),
+                        "on": heat_state.get('is_heat_on', True)
+                    }
                 }
 
                 if frame_counter % 60 == 0 and session.dropped_frames > 0:

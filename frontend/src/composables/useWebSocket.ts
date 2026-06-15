@@ -55,6 +55,15 @@ function expandFrameData(data: any): any {
     expanded.frame_count = data.fc;
     delete expanded.fc;
   }
+  if ('h' in data) {
+    expanded.heat = {
+      performance_time: data.h.t ?? 0,
+      heat_level: data.h.hl ?? 0,
+      softness: data.h.s ?? 0,
+      is_heat_on: data.h.on ?? true
+    };
+    delete expanded.h;
+  }
 
   return expanded;
 }
@@ -69,6 +78,12 @@ export function useWebSocket() {
   const lastFrame = ref<FrameData | null>(null);
   const lastAction = ref<ActionAppliedData | null>(null);
   const errorMessage = ref<string>('');
+  const heatState = ref({
+    performance_time: 0,
+    heat_level: 0,
+    softness: 0,
+    is_heat_on: true
+  });
 
   let ws: WebSocket | null = null;
   let pingInterval: ReturnType<typeof setInterval> | null = null;
@@ -82,6 +97,7 @@ export function useWebSocket() {
 
   const onFrameCallbacks: ((frame: FrameData) => void)[] = [];
   const onActionCallbacks: ((action: ActionAppliedData) => void)[] = [];
+  const onHeatCallbacks: ((heat: any) => void)[] = [];
 
   function onFrame(callback: (frame: FrameData) => void) {
     onFrameCallbacks.push(callback);
@@ -89,6 +105,10 @@ export function useWebSocket() {
 
   function onAction(callback: (action: ActionAppliedData) => void) {
     onActionCallbacks.push(callback);
+  }
+
+  function onHeat(callback: (heat: any) => void) {
+    onHeatCallbacks.push(callback);
   }
 
   function _flushSendQueue() {
@@ -167,6 +187,24 @@ export function useWebSocket() {
     });
   }
 
+  function sendHeatOn(on: boolean) {
+    send({
+      type: 'heat_on',
+      on: on
+    });
+  }
+
+  function sendHeatLevel(level: number) {
+    send({
+      type: 'heat_level',
+      level: Math.max(0, Math.min(1, level))
+    });
+  }
+
+  function sendHeatReset() {
+    send({ type: 'heat_reset' });
+  }
+
   function flushQueue() {
     _flushSendQueue();
   }
@@ -181,6 +219,10 @@ export function useWebSocket() {
           const expanded = expandFrameData(rawData);
           const frameData = rawData.type === 'state' ? { ...expanded, type: 'frame' } : expanded;
           lastFrame.value = frameData;
+          if (frameData.heat) {
+            heatState.value = { ...frameData.heat };
+            onHeatCallbacks.forEach(cb => cb(frameData.heat));
+          }
           onFrameCallbacks.forEach(cb => cb(frameData));
           break;
         }
@@ -195,6 +237,9 @@ export function useWebSocket() {
         }
         case 'reset_complete':
           console.log('Reset complete');
+          break;
+        case 'heat_ack':
+          console.log('Heat control acknowledged:', rawData);
           break;
         case 'batch_result': {
           const expanded = expandFrameData(rawData);
@@ -295,13 +340,18 @@ export function useWebSocket() {
     lastFrame,
     lastAction,
     errorMessage,
+    heatState,
     connect,
     disconnect,
     send,
     sendKeyPress,
     sendKeySequence,
     sendReset,
+    sendHeatOn,
+    sendHeatLevel,
+    sendHeatReset,
     onFrame,
-    onAction
+    onAction,
+    onHeat
   };
 }

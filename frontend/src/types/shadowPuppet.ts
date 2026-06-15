@@ -6,11 +6,19 @@ export interface JointData {
   position: number[];
 }
 
+export interface HeatState {
+  performance_time: number;
+  heat_level: number;
+  softness: number;
+  is_heat_on: boolean;
+}
+
 export interface FrameData {
   type: 'frame';
   timestamp: number;
   physics_time: number;
   joints: Record<string, JointData>;
+  heat?: HeatState;
 }
 
 export interface ActionAppliedData {
@@ -35,6 +43,15 @@ export interface StateData {
   timestamp: number;
   physics_time: number;
   joints: Record<string, JointData>;
+  heat?: HeatState;
+}
+
+export interface HeatAckData {
+  type: 'heat_ack';
+  on?: boolean;
+  level?: number;
+  reset?: boolean;
+  timestamp: number;
 }
 
 export interface BatchResultData {
@@ -54,6 +71,7 @@ export type WebSocketMessage =
   | ResetCompleteData 
   | PongData 
   | StateData 
+  | HeatAckData
   | BatchResultData 
   | ErrorData;
 
@@ -87,13 +105,30 @@ export interface BatchSequenceMessage {
   duration: number;
 }
 
+export interface HeatOnMessage {
+  type: 'heat_on';
+  on: boolean;
+}
+
+export interface HeatLevelMessage {
+  type: 'heat_level';
+  level: number;
+}
+
+export interface HeatResetMessage {
+  type: 'heat_reset';
+}
+
 export type OutgoingMessage = 
   | KeyPressMessage 
   | KeySequenceMessage 
   | ResetMessage 
   | PingMessage 
   | GetStateMessage 
-  | BatchSequenceMessage;
+  | BatchSequenceMessage
+  | HeatOnMessage
+  | HeatLevelMessage
+  | HeatResetMessage;
 
 export interface PuppetJoint {
   name: string;

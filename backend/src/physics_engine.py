@@ -49,8 +49,28 @@ class ShadowPuppetPhysics:
         self.joint_dimensions: Dict[str, Tuple[float, float]] = {}
         self.time = 0.0
         self.dt = 0.016
+        
+        self.performance_time = 0.0
+        self.heat_level = 0.0
+        self.softness_coefficient = 0.0
+        self.max_softness = 0.7
+        self.heat_accumulation_rate = 0.05
+        self.cooling_rate = 0.1
+        self.is_heat_on = True
+        self.base_young_modulus = self.material.young_modulus
+        self.base_damping = self.material.damping_coefficient
+        self.original_joint_limits: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+        
         self._init_puppet_skeleton()
+        self._save_original_joint_limits()
         self._init_key_action_map()
+
+    def _save_original_joint_limits(self):
+        for joint_name, joint in self.joints.items():
+            self.original_joint_limits[joint_name] = (
+                joint.joint_limits[0].copy(),
+                joint.joint_limits[1].copy()
+            )
 
     def _init_puppet_skeleton(self):
         self.joints['root'] = JointState(
@@ -424,10 +444,58 @@ class ShadowPuppetPhysics:
                 if joint.angular_velocity[i] > 0:
                     joint.angular_velocity[i] *= -0.3
 
+    def _update_heat_state(self, dt: float) -> None:
+        if self.is_heat_on:
+            self.performance_time += dt
+            self.heat_level = min(1.0, self.heat_level + self.heat_accumulation_rate * dt)
+        else:
+            self.heat_level = max(0.0, self.heat_level - self.cooling_rate * dt)
+
+        self.softness_coefficient = self.heat_level * self.max_softness
+
+        stiffness_factor = 1.0 - self.softness_coefficient * 0.6
+        damping_factor = 1.0 - self.softness_coefficient * 0.3
+
+        self.material.young_modulus = self.base_young_modulus * stiffness_factor
+        self.material.damping_coefficient = self.base_damping * damping_factor
+
+        for joint_name, joint in self.joints.items():
+            if joint_name not in self.original_joint_limits:
+                continue
+            original_min, original_max = self.original_joint_limits[joint_name]
+            limit_expansion = 1.0 + self.softness_coefficient * 0.4
+            joint.joint_limits = (
+                original_min * limit_expansion,
+                original_max * limit_expansion
+            )
+
+    def set_heat_on(self, on: bool) -> None:
+        self.is_heat_on = on
+
+    def set_heat_level(self, level: float) -> None:
+        self.heat_level = max(0.0, min(1.0, level))
+
+    def reset_heat(self) -> None:
+        self.heat_level = 0.0
+        self.softness_coefficient = 0.0
+        self.performance_time = 0.0
+        self.material.young_modulus = self.base_young_modulus
+        self.material.damping_coefficient = self.base_damping
+
+    def get_heat_state(self) -> Dict[str, float]:
+        return {
+            'performance_time': self._round_value(self.performance_time, 2),
+            'heat_level': self._round_value(self.heat_level, 3),
+            'softness': self._round_value(self.softness_coefficient, 3),
+            'is_heat_on': self.is_heat_on
+        }
+
     def step(self, dt: float = None) -> Dict[str, Dict]:
         if dt is None:
             dt = self.dt
         self.time += dt
+        
+        self._update_heat_state(dt)
 
         current_actions = []
         still_pending = []
@@ -478,7 +546,10 @@ class ShadowPuppetPhysics:
 
             joint.tension_force = tension_forces[joint_name].copy()
 
-        return self._get_joint_rotations()
+        return {
+            'joints': self._get_joint_rotations(),
+            'heat': self.get_heat_state()
+        }
 
     @staticmethod
     def _round_value(value: float, decimals: int = 2) -> float:
@@ -534,6 +605,7 @@ class ShadowPuppetPhysics:
     def reset(self) -> None:
         self.time = 0.0
         self.pending_actions = []
+        self.reset_heat()
         for joint in self.joints.values():
             joint.angle = joint.rest_angle.copy()
             joint.angular_velocity = np.zeros(3)
@@ -560,7 +632,8 @@ class ShadowPuppetPhysics:
             results.append({
                 'timestamp': self.time,
                 'frame': frame,
-                'joints': frame_data
+                'joints': frame_data['joints'],
+                'heat': frame_data['heat']
             })
 
         return results
